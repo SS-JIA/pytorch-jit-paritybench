@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import pickle
 import sys
 import torch
 import torch._dynamo
@@ -48,6 +49,7 @@ def get_args(raw_args=None):
     group.add_argument("--compile-one", help="Check torch.jit.script on a given test_*.py file")
     group.add_argument("--compile-all", action="store_true", help="Check torch.jit.script on a given test_*.py file")
     group.add_argument("--evaluate-all", action="store_true", help="Check torch.jit.script parity")
+    group.add_argument("--load-pickle", action="store_true", help="Load saved stats")
 
     parser.add_argument("--verbose", action="store_true", help="Print more logs")
 
@@ -66,6 +68,9 @@ def get_args(raw_args=None):
     parser.add_argument("--download-dir", default="./paritybench_download", help="dir where to download project default: ./paritybench_download")
     parser.add_argument("--tests-dir", default="./generated", help="dir where to generate test scripts default: ./generated")
     parser.add_argument("--metric-path", type=str, help="path of the compilation metric")
+
+    parser.add_argument("--pickle-path", type=str, help="path of the pickle file")
+
     args = parser.parse_args(raw_args)
     return args
 
@@ -99,6 +104,12 @@ def main(raw_args=None):
         if args.verbose:
             print(sorted(opset))
         return compile_all(opset, args, tests_dir=args.tests_dir, offset=args.offset, limit=args.limit, jobs=args.jobs)
+
+    if args.load_pickle:
+        with open(args.pickle_path, "rb") as f:
+            stats = pickle.load(f)
+            log.info(f"TOTAL: {stats}")
+        return
 
     if args.generate_one:
         return main_one_file(generate_zipfile_subproc, args.generate_one, args)

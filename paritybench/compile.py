@@ -1,6 +1,7 @@
 import dataclasses
 import logging
 import os
+import pickle
 import re
 import time
 from functools import partial
@@ -222,3 +223,7 @@ def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, li
     )
 
     log.info(f"TOTAL: {stats}, took {time.time() - start:.1f} seconds\n\n{args.compile_mode} {args.backend} ParityBench:\n{report}")
+
+    if args.pickle_path is not None:
+        with open(args.pickle_path, "wb") as f:
+            f.write(pickle.dumps(stats))
