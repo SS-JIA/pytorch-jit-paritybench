@@ -8,11 +8,16 @@ from functools import partial
 
 from paritybench.crawler import CrawlGitHub
 from paritybench.evaluate import evaluate_all, evaluate_pyfile_subproc
+from paritybench.compile import compile_all, compile_pyfile_subproc
 from paritybench.generate import generate_all, generate_zipfile_subproc
 from paritybench.generate import write_helpers
-from paritybench.utils import subproc_wrapper, tempdir_wrapper
+from paritybench.utils import subproc_wrapper, tempdir_wrapper, get_opset
 
 log = logging.getLogger(__name__)
+
+NATIVE_FUNCTION_YAML_PATH = f"/data/users/{os.environ['USER']}/fbsource/xplat/caffe2/aten/src/ATen/native/native_functions.yaml"
+TAGS_YAML_PATH = f"/data/users/{os.environ['USER']}/fbsource/xplat/caffe2/aten/src/ATen/native/tags.yaml"
+PORTABLE_YAML_PATH = f"/data/users/{os.environ['USER']}/fbsource/xplat/executorch/kernels/portable/functions.yaml"
 
 def main_one_file(fn, path, args):
     if ':' in path and not args.filter:
@@ -40,7 +45,11 @@ def get_args(raw_args=None):
                        help="Turn crawled github projects into generated testcases")
     group.add_argument("--generate-one", "-g", help="Process a .zip file from a github download")
     group.add_argument("--evaluate-one", "-e", help="Check torch.jit.script on a given test_*.py file")
+    group.add_argument("--compile-one", help="Check torch.jit.script on a given test_*.py file")
+    group.add_argument("--compile-all", action="store_true", help="Check torch.jit.script on a given test_*.py file")
     group.add_argument("--evaluate-all", action="store_true", help="Check torch.jit.script parity")
+
+    parser.add_argument("--verbose", action="store_true", help="Print more logs")
 
     parser.add_argument("--jobs", "-j", type=int, default=4)
     parser.add_argument("--offset", type=int, default=0, help="Pick files starting from this offset. Together with --limit, we can run through all files in multiple separate runs")
@@ -77,6 +86,19 @@ def main(raw_args=None):
 
     if args.evaluate_one:
         return main_one_file(evaluate_pyfile_subproc, args.evaluate_one, args)
+
+    if args.compile_one:
+        opset = get_opset(NATIVE_FUNCTION_YAML_PATH, TAGS_YAML_PATH, PORTABLE_YAML_PATH)
+        if args.verbose:
+            print(sorted(opset))
+        callfn = partial(compile_pyfile_subproc, opset=opset)
+        return main_one_file(callfn, args.compile_one, args)
+
+    if args.compile_all:
+        opset = get_opset(NATIVE_FUNCTION_YAML_PATH, TAGS_YAML_PATH, PORTABLE_YAML_PATH)
+        if args.verbose:
+            print(sorted(opset))
+        return compile_all(opset, args, tests_dir=args.tests_dir, offset=args.offset, limit=args.limit, jobs=args.jobs)
 
     if args.generate_one:
         return main_one_file(generate_zipfile_subproc, args.generate_one, args)

@@ -1,3 +1,4 @@
+from collections import OrderedDict
 import copy
 import functools
 import logging
@@ -13,10 +14,13 @@ import tempfile
 import time
 import types
 import torch
+import yaml
 
 from torch import multiprocessing
 from torch._dynamo.utils import clone_inputs
 from torch.utils._pytree import tree_map
+
+from torchgen.gen import parse_native_yaml
 
 from paritybench.reporting import ErrorAggregatorDict, Stats
 
@@ -205,6 +209,75 @@ def get_cosine_and_fp64_outputs(model, example_inputs):
         fp64_outputs = None
     return cosine, fp64_outputs
 
+def get_core_aten_ops(native_function_yaml_path, tags_yaml_path):
+    parsed_yaml = parse_native_yaml(native_function_yaml_path, tags_yaml_path)
+    native_functions = parsed_yaml.native_functions
+
+    aten_ops = OrderedDict()
+    for function in native_functions:
+        if "core" in function.tags:
+            op_name = str(function.func.name)
+            aten_ops[op_name] = function
+
+    op_names = set()
+    for key, op in sorted(aten_ops.items()):
+        op_name = f"aten::{key}"
+        op_names.add(op_name)
+
+    return op_names
+
+def get_portable_ops(portable_yaml_path):
+    parsed_yaml = ""
+    with open(portable_yaml_path, "r") as stream:
+        try:
+            parsed_yaml = yaml.safe_load(stream)
+        except yaml.YAMLError as exc:
+            print(exc)
+
+    portable_ops = set()
+    for op_entry in parsed_yaml:
+        if 'op' in op_entry:
+            #portable_ops.add("aten::{}".format(op_entry["op"].split(".")[0]))
+            portable_ops.add(op_entry["op"])
+
+    return portable_ops
+
+def add_op_to_opset(function, opset):
+    op_name = str(function.func.name)
+    opset.add("aten::{}".format(op_name))
+
+    # Add structured delegates
+    if function.structured_delegate is not None:
+        opset.add("aten::{}".format(str(function.structured_delegate)))
+    # Add autogen
+    if len(function.autogen) > 0:
+        for autogen_func in function.autogen:
+            opset.add("aten::{}".format(str(autogen_func)))
+
+def get_opset(native_function_yaml_path, tags_yaml_path, portable_yaml_path):
+    portable_op_names = get_portable_ops(portable_yaml_path)
+
+    parsed_yaml = parse_native_yaml(native_function_yaml_path, tags_yaml_path)
+    native_functions = parsed_yaml.native_functions
+
+    opset = set()
+    for function in native_functions:
+        if "core" in function.tags:
+            add_op_to_opset(function, opset)
+        else:
+            if function.structured_delegate is not None:
+                out_var = str(function.structured_delegate)
+                if out_var in portable_op_names:
+                    add_op_to_opset(function, opset)
+            if len(function.autogen) > 0:
+                for autogen_func in function.autogen:
+                    if str(autogen_func) in portable_op_names:
+                        add_op_to_opset(function, opset)
+
+    # Some ops need to be handled explicitly
+    opset.add("aten::mean")
+
+    return opset
 
 DYNAMO_TOL = 1e-4
 INDUCTOR_TOL = 1e-3
