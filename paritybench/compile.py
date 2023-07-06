@@ -108,6 +108,10 @@ def compile_nn_module(opset, nn_cls, get_init_args, get_forward_args, record_err
 
             not_supported = set()
             for op in ops:
+                # Assume unsafe ops will become regular versions...
+                if "_unsafe_" in op:
+                    op = op.replace("_unsafe_", "")
+
                 if op not in opset:
                     not_supported.add(op)
 
@@ -176,6 +180,14 @@ def compile_pyfile_subproc(tempdir: str, path: str, args, opset):
             for op in not_supported:
                 stats[op] += 1
 
+            if len(not_supported) > 0:
+                # Log the set as it's own entry
+                set_key = "set("
+                for op in sorted(not_supported):
+                    set_key += f"{op}, "
+                set_key = set_key[:-2] + ")"
+                stats[set_key] += 1
+
         except JitFailed:
             pass
         except EagerFailed:
@@ -230,7 +242,17 @@ def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, li
         columns=["total", "passing", "score"],
     )
 
-    log.info(f"TOTAL: {stats}, took {time.time() - start:.1f} seconds\n\n{args.compile_mode} {args.backend} ParityBench:\n{report}")
+    log.info(f"TOTAL: {stats}, took {time.time() - start:.1f} seconds\n\n{args.compile_mode} {args.backend} ParityBench:\n{report}\n\n")
+
+    for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+        if key.startswith("aten"):
+            print(f"{key}: {value}")
+
+    print("\n\n")
+
+    for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+        if key.startswith("set("):
+            print(f"{key}: {value}")
 
     if args.pickle_path is not None:
         with open(args.pickle_path, "wb") as f:

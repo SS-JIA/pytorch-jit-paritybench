@@ -124,6 +124,13 @@ def main(raw_args=None):
             for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
                 if key.startswith("aten"):
                     print(f"{key}: {value}")
+
+            print("\n\n")
+
+            for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+                if key.startswith("aten"):
+                    print(f"{key}: {value}")
+
         return
 
     if args.generate_one:
