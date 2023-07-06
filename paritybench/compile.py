@@ -13,9 +13,9 @@ import torch
 import torch._dynamo
 import torch._inductor
 from torch.testing._internal.jit_utils import JitTestCase
-from torch._decomp import core_aten_decompositions
+from torch._decomp import core_aten_decompositions, get_decompositions
 from torch._dynamo.testing import same
-from torch._export import ExportDynamoConfig
+from torch._export import aot_export_module, ExportDynamoConfig
 
 from paritybench.reporting import ErrorAggregatorDict, Stats
 from paritybench.utils import import_file, get_skiplist, get_cosine_and_fp64_outputs, get_tol, \
@@ -77,6 +77,14 @@ def compile_nn_module(opset, nn_cls, get_init_args, get_forward_args, record_err
     kwargs = wrap_kwargs(kwargs, device)
 
     try:
+        # decomp_opset = [
+        #     torch.ops.aten.log_sigmoid_forward,
+        #     torch.ops.aten.ones,
+        #     torch.ops.aten.arange.default,
+        #     torch.ops.aten.arange.start,
+        #     torch.ops.aten.transpose,
+        # ]
+        # DECOMP_TABLE = get_decompositions(decomp_opset)
         DECOMP_TABLE = core_aten_decompositions()
 
         with torch._dynamo.config.patch(dataclasses.asdict(ExportDynamoConfig())):

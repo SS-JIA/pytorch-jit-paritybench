@@ -1,8 +1,10 @@
 import argparse
 import logging
 import os
+import pandas as pd
 import pickle
 import sys
+import time
 import torch
 import torch._dynamo
 from functools import partial
@@ -108,7 +110,20 @@ def main(raw_args=None):
     if args.load_pickle:
         with open(args.pickle_path, "rb") as f:
             stats = pickle.load(f)
-            log.info(f"TOTAL: {stats}")
+
+            index = ("projects", "tests", "ops")
+            report = pd.DataFrame(
+                [[stats[f"{k}"], stats[f"{k}_passed"], "{:.1%}".format(stats[f"{k}_passed"] / (stats[f"{k}"] or 1))]
+                for k in index],
+                index=index,
+                columns=["total", "passing", "score"],
+            )
+
+            log.info(f"TOTAL: {stats}\n\nParityBench:\n{report}\n\n")
+
+            for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
+                if key.startswith("aten"):
+                    print(f"{key}: {value}")
         return
 
     if args.generate_one:

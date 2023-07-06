@@ -213,18 +213,23 @@ def get_core_aten_ops(native_function_yaml_path, tags_yaml_path):
     parsed_yaml = parse_native_yaml(native_function_yaml_path, tags_yaml_path)
     native_functions = parsed_yaml.native_functions
 
-    aten_ops = OrderedDict()
+    core_op_names = set()
     for function in native_functions:
         if "core" in function.tags:
-            op_name = str(function.func.name)
-            aten_ops[op_name] = function
+            core_op_names.add(str(function.func.name))
+            if function.structured_delegate is not None:
+                core_op_names.add(str(function.structured_delegate))
+            if len(function.autogen) > 0:
+                for autogen_func in function.autogen:
+                    core_op_names.add(str(autogen_func))
 
-    op_names = set()
-    for key, op in sorted(aten_ops.items()):
-        op_name = f"aten::{key}"
-        op_names.add(op_name)
+    # Manually add some core operators that won't be captured by the above
+    core_op_names.add("div.Scalar_out")
+    core_op_names.add("mul.Scalar_out")
+    core_op_names.add("add.Scalar_out")
+    core_op_names.add("sub.Scalar_out")
 
-    return op_names
+    return core_op_names
 
 def get_portable_ops(portable_yaml_path):
     parsed_yaml = ""
@@ -237,7 +242,6 @@ def get_portable_ops(portable_yaml_path):
     portable_ops = set()
     for op_entry in parsed_yaml:
         if 'op' in op_entry:
-            #portable_ops.add("aten::{}".format(op_entry["op"].split(".")[0]))
             portable_ops.add(op_entry["op"])
 
     return portable_ops
@@ -255,6 +259,7 @@ def add_op_to_opset(function, opset):
             opset.add("aten::{}".format(str(autogen_func)))
 
 def get_opset(native_function_yaml_path, tags_yaml_path, portable_yaml_path):
+    core_op_names = get_core_aten_ops(native_function_yaml_path, tags_yaml_path)
     portable_op_names = get_portable_ops(portable_yaml_path)
 
     parsed_yaml = parse_native_yaml(native_function_yaml_path, tags_yaml_path)
@@ -267,10 +272,10 @@ def get_opset(native_function_yaml_path, tags_yaml_path, portable_yaml_path):
         else:
             if function.structured_delegate is not None:
                 out_var = str(function.structured_delegate)
-                if out_var in portable_op_names:
+                if out_var in portable_op_names or out_var in core_op_names:
                     add_op_to_opset(function, opset)
             if len(function.autogen) > 0:
-                for autogen_func in function.autogen:
+                for autogen_func in function.autogen or autogen_func in core_op_names:
                     if str(autogen_func) in portable_op_names:
                         add_op_to_opset(function, opset)
 
