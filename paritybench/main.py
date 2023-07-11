@@ -128,7 +128,7 @@ def main(raw_args=None):
             print("\n\n")
 
             for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-                if key.startswith("aten"):
+                if key.startswith("set("):
                     print(f"{key}: {value}")
 
         return
