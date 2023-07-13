@@ -16,6 +16,7 @@ from torch.testing._internal.jit_utils import JitTestCase
 from torch._decomp import core_aten_decompositions, get_decompositions
 from torch._dynamo.testing import same
 from torch._export import aot_export_module, ExportDynamoConfig
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from paritybench.reporting import ErrorAggregatorDict, Stats
 from paritybench.utils import import_file, get_skiplist, get_cosine_and_fp64_outputs, get_tol, \
@@ -87,37 +88,38 @@ def compile_nn_module(opset, nn_cls, get_init_args, get_forward_args, record_err
         # DECOMP_TABLE = get_decompositions(decomp_opset)
         DECOMP_TABLE = core_aten_decompositions()
 
-        with torch._dynamo.config.patch(dataclasses.asdict(ExportDynamoConfig())):
-            exported_model, _ = torch._dynamo.export(
-                nn,
-                *args,
-                aten_graph=True,
-                tracing_mode="symbolic",
-                decomposition_table=DECOMP_TABLE,
-                constraints=None,
-                assume_static_by_default=True,
-                **kwargs
-            )
+        exported_model = make_fx(
+            nn,
+            decomposition_table=DECOMP_TABLE,
+            tracing_mode="symbolic",
+            _allow_non_fake_inputs = True,
+        )(*args, **kwargs)
 
-            ops = set()
-            for node in exported_model.graph.nodes:
-                if node.op == "call_function" and isinstance(
-                    node.target, (OpOverload)
-                ):
-                    ops.add(node.target.name())
+        ops = set()
+        for node in exported_model.graph.nodes:
+            if node.op == "call_function" and isinstance(
+                node.target, (OpOverload)
+            ):
+                ops.add(node.target.name())
 
-            not_supported = set()
-            for op in ops:
-                # Assume unsafe ops will become regular versions...
-                if "_unsafe_" in op:
-                    op = op.replace("_unsafe_", "")
+        not_supported = set()
+        for op in ops:
+            # Skip unbind
+            if "unbind" in op:
+                continue
 
-                if op not in opset:
-                    not_supported.add(op)
+            # Assume unsafe ops will become regular versions...
+            if "_unsafe_" in op:
+                op = op.replace("_unsafe_", "")
+            if "unsafe_" in op:
+                op = op.replace("unsafe_", "")
 
-            if main_args.verbose:
-                print("ops found: {}".format(ops))
-                print("not supported: {}".format(not_supported))
+            if op not in opset:
+                not_supported.add(op)
+
+        if main_args.verbose:
+            print("ops found: {}".format(ops))
+            print("not supported: {}".format(not_supported))
 
     except Exception as e:
         record_error('run_jit {} '.format(main_args.compile_mode), e)
@@ -242,18 +244,28 @@ def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, li
         columns=["total", "passing", "score"],
     )
 
+    pickle_obj = {}
+
     log.info(f"TOTAL: {stats}, took {time.time() - start:.1f} seconds\n\n{args.compile_mode} {args.backend} ParityBench:\n{report}\n\n")
 
+    missing_ops = list()
     for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
         if key.startswith("aten"):
             print(f"{key}: {value}")
+            missing_ops += [(key, value),]
+    pickle_obj["missing_ops"] = missing_ops
 
     print("\n\n")
 
+    missing_sets = list()
     for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
         if key.startswith("set("):
             print(f"{key}: {value}")
+            missing_sets += [(key, value),]
+    pickle_obj["missing_sets"] = missing_sets
+
+    pickle_obj["reference_opset"] = opset
 
     if args.pickle_path is not None:
         with open(args.pickle_path, "wb") as f:
-            f.write(pickle.dumps(stats))
+            f.write(pickle.dumps(pickle_obj))

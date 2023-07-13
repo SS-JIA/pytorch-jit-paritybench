@@ -14,7 +14,7 @@ from paritybench.evaluate import evaluate_all, evaluate_pyfile_subproc
 from paritybench.compile import compile_all, compile_pyfile_subproc
 from paritybench.generate import generate_all, generate_zipfile_subproc
 from paritybench.generate import write_helpers
-from paritybench.utils import subproc_wrapper, tempdir_wrapper, get_opset
+from paritybench.utils import subproc_wrapper, tempdir_wrapper
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +71,7 @@ def get_args(raw_args=None):
     parser.add_argument("--tests-dir", default="./generated", help="dir where to generate test scripts default: ./generated")
     parser.add_argument("--metric-path", type=str, help="path of the compilation metric")
 
+    parser.add_argument("--opset-path", type=str, help="path of the saved opset to compare against")
     parser.add_argument("--pickle-path", type=str, help="path of the pickle file")
 
     args = parser.parse_args(raw_args)
@@ -94,42 +95,32 @@ def main(raw_args=None):
     if args.evaluate_one:
         return main_one_file(evaluate_pyfile_subproc, args.evaluate_one, args)
 
+    opset = {}
+    if args.opset_path:
+        with open(args.opset_path, "rb") as f:
+            opset = pickle.load(f)
+
+    if args.verbose:
+        print(sorted(opset))
+
     if args.compile_one:
-        opset = get_opset(NATIVE_FUNCTION_YAML_PATH, TAGS_YAML_PATH, PORTABLE_YAML_PATH)
-        if args.verbose:
-            print(sorted(opset))
         callfn = partial(compile_pyfile_subproc, opset=opset)
         return main_one_file(callfn, args.compile_one, args)
 
     if args.compile_all:
-        opset = get_opset(NATIVE_FUNCTION_YAML_PATH, TAGS_YAML_PATH, PORTABLE_YAML_PATH)
-        if args.verbose:
-            print(sorted(opset))
         return compile_all(opset, args, tests_dir=args.tests_dir, offset=args.offset, limit=args.limit, jobs=args.jobs)
 
     if args.load_pickle:
         with open(args.pickle_path, "rb") as f:
-            stats = pickle.load(f)
+            pickled_dict = pickle.load(f)
 
-            index = ("projects", "tests", "ops")
-            report = pd.DataFrame(
-                [[stats[f"{k}"], stats[f"{k}_passed"], "{:.1%}".format(stats[f"{k}_passed"] / (stats[f"{k}"] or 1))]
-                for k in index],
-                index=index,
-                columns=["total", "passing", "score"],
-            )
-
-            log.info(f"TOTAL: {stats}\n\nParityBench:\n{report}\n\n")
-
-            for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-                if key.startswith("aten"):
-                    print(f"{key}: {value}")
+            for op, count in pickled_dict["missing_ops"]:
+                print(f"{op}: {count}")
 
             print("\n\n")
 
-            for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-                if key.startswith("set("):
-                    print(f"{key}: {value}")
+            for op_set, count in pickled_dict["missing_sets"]:
+                print(f"{op_set}: {count}")
 
         return
 
