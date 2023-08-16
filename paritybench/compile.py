@@ -46,12 +46,23 @@ class JitFailed(RuntimeError):
 
 def get_module_ops(module, args, kwargs, decomp_table):
     #flat_args, _ = pytree.tree_flatten((args, kwargs))
-    exported_model = make_fx(
+    # exported_model = make_fx(
+    #     module,
+    #     decomposition_table=decomp_table,
+    #     tracing_mode="symbolic",
+    #     _allow_non_fake_inputs=True,
+    # )(*args, **kwargs)
+    exported_model, _ = torch._dynamo.export(
         module,
-        decomposition_table=decomp_table,
+        *args,
+        aten_graph=True,
         tracing_mode="symbolic",
-        _allow_non_fake_inputs=True,
-    )(*args, **kwargs)
+        pre_dispatch=True,
+        decomposition_table=decomp_table,
+        constraints=None,
+        assume_static_by_default=True,
+        **kwargs
+    )
 
     ops = set()
     for node in exported_model.graph.nodes:
@@ -97,12 +108,12 @@ def get_nn_module_ops(nn_cls, get_init_args, get_forward_args, record_error, mai
     kwargs = wrap_kwargs(kwargs, device)
 
     scripted_ops = set()
-    try:
-        nn_script = torch.jit.script(nn)
-        scripted_ops = set(torch.jit.export_opnames(nn_script))
-        print(f"{nn_cls.__name__} scripted ops: {scripted_ops}")
-    except Exception as e:
-        pass
+    # try:
+    #     nn_script = torch.jit.script(nn)
+    #     scripted_ops = set(torch.jit.export_opnames(nn_script))
+    #     print(f"{nn_cls.__name__} scripted ops: {scripted_ops}")
+    # except Exception as e:
+    #     pass
 
     core_decomp_ops = set()
     edge_decomp_ops = set()
@@ -120,8 +131,8 @@ def get_nn_module_ops(nn_cls, get_init_args, get_forward_args, record_error, mai
         ]
         edge_decompositions = get_decompositions(edge_decomp_opset)
 
-        core_decomp_ops = get_module_ops(nn, args, kwargs, core_aten_decompositions())
-        edge_decomp_ops = get_module_ops(nn, args, kwargs, edge_decompositions)
+        # core_decomp_ops = get_module_ops(nn, args, kwargs, core_aten_decompositions())
+        # edge_decomp_ops = get_module_ops(nn, args, kwargs, edge_decompositions)
         no_decomp_ops = get_module_ops(nn, args, kwargs, {})
 
         print(f"{nn_cls.__name__} core decomp ops: {core_decomp_ops}")
