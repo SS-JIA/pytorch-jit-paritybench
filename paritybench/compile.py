@@ -20,9 +20,10 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from paritybench.reporting import ErrorAggregatorDict, Stats
 from paritybench.utils import import_file, get_skiplist, get_cosine_and_fp64_outputs, get_tol, \
-    patch_torch_manual_seed, reset_rng_state, subproc_wrapper, wrap_args, wrap_kwargs
+    patch_torch_manual_seed, reset_rng_state, subproc_wrapper_mod, wrap_args, wrap_kwargs
 
 from torch._ops import OpOverload
+import torch.utils._pytree as pytree
 
 log = logging.getLogger(__name__)
 
@@ -43,8 +44,26 @@ class OnnxFailed(RuntimeError):
 class JitFailed(RuntimeError):
     pass
 
+def get_module_ops(module, args, kwargs, decomp_table):
+    #flat_args, _ = pytree.tree_flatten((args, kwargs))
+    exported_model = make_fx(
+        module,
+        decomposition_table=decomp_table,
+        tracing_mode="symbolic",
+        _allow_non_fake_inputs=True,
+    )(*args, **kwargs)
 
-def compile_nn_module(opset, nn_cls, get_init_args, get_forward_args, record_error, main_args, path):
+    ops = set()
+    for node in exported_model.graph.nodes:
+        if node.op == "call_function" and isinstance(
+            node.target, (OpOverload)
+        ):
+            ops.add(node.target.name())
+
+    return ops
+
+
+def get_nn_module_ops(nn_cls, get_init_args, get_forward_args, record_error, main_args, path):
     """
     Run an nn.Module with torch.jit.script and see if it works the same
     as eager.
@@ -77,59 +96,46 @@ def compile_nn_module(opset, nn_cls, get_init_args, get_forward_args, record_err
     args = wrap_args(args, device)
     kwargs = wrap_kwargs(kwargs, device)
 
+    scripted_ops = set()
     try:
-        # decomp_opset = [
-        #     torch.ops.aten.log_sigmoid_forward,
-        #     torch.ops.aten.ones,
-        #     torch.ops.aten.arange.default,
-        #     torch.ops.aten.arange.start,
-        #     torch.ops.aten.transpose,
-        # ]
-        # DECOMP_TABLE = get_decompositions(decomp_opset)
-        DECOMP_TABLE = core_aten_decompositions()
+        nn_script = torch.jit.script(nn)
+        scripted_ops = set(torch.jit.export_opnames(nn_script))
+        print(f"{nn_cls.__name__} scripted ops: {scripted_ops}")
+    except Exception as e:
+        pass
 
-        exported_model = make_fx(
-            nn,
-            decomposition_table=DECOMP_TABLE,
-            tracing_mode="symbolic",
-            _allow_non_fake_inputs = True,
-        )(*args, **kwargs)
+    core_decomp_ops = set()
+    edge_decomp_ops = set()
+    no_decomp_ops = set()
 
-        ops = set()
-        for node in exported_model.graph.nodes:
-            if node.op == "call_function" and isinstance(
-                node.target, (OpOverload)
-            ):
-                ops.add(node.target.name())
+    success = True
 
-        not_supported = set()
-        for op in ops:
-            # Skip unbind
-            if "unbind" in op:
-                continue
+    try:
+        edge_decomp_opset = [
+            torch.ops.aten.log_sigmoid_forward,
+            torch.ops.aten.ones,
+            torch.ops.aten.arange.default,
+            torch.ops.aten.arange.start,
+            torch.ops.aten.transpose,
+        ]
+        edge_decompositions = get_decompositions(edge_decomp_opset)
 
-            # Assume unsafe ops will become regular versions...
-            if "_unsafe_" in op:
-                op = op.replace("_unsafe_", "")
-            if "unsafe_" in op:
-                op = op.replace("unsafe_", "")
+        core_decomp_ops = get_module_ops(nn, args, kwargs, core_aten_decompositions())
+        edge_decomp_ops = get_module_ops(nn, args, kwargs, edge_decompositions)
+        no_decomp_ops = get_module_ops(nn, args, kwargs, {})
 
-            if op not in opset:
-                not_supported.add(op)
-
-        if main_args.verbose:
-            print("ops found: {}".format(ops))
-            print("not supported: {}".format(not_supported))
+        print(f"{nn_cls.__name__} core decomp ops: {core_decomp_ops}")
+        print(f"{nn_cls.__name__} edge decomp ops: {edge_decomp_ops}")
+        print(f"{nn_cls.__name__} no decomp ops: {no_decomp_ops}")
 
     except Exception as e:
-        record_error('run_jit {} '.format(main_args.compile_mode), e)
-        raise JitFailed()
+        record_error('make_fx error from {} '.format(main_args.compile_mode), e)
+        success = False
 
-    all_supported = len(not_supported) == 0
-    return True, all_supported, not_supported
+    return success, core_decomp_ops, edge_decomp_ops, no_decomp_ops, scripted_ops
 
 
-def compile_pyfile_subproc(tempdir: str, path: str, args, opset):
+def compile_pyfile_subproc(tempdir: str, path: str, args):
     """
     compile/test all the TESTCASES in path.
 
@@ -139,9 +145,10 @@ def compile_pyfile_subproc(tempdir: str, path: str, args, opset):
     errors = ErrorAggregatorDict(path)
     stats = Stats()
     module = import_file(path)
+    nn_ops_dict = {}
 
     if not module.TESTCASES:
-        return errors, stats
+        return errors, stats, nn_ops_dict
 
     stats["projects"] += 1
 
@@ -160,35 +167,31 @@ def compile_pyfile_subproc(tempdir: str, path: str, args, opset):
         if nn_cls.forward.__name__ == "_forward_unimplemented":
             continue
 
-        stats["tests"] += 1
+        stats["export_attempts"] += 1
         repro = f"{nn_cls.__name__} # pytest {path} -k test_{index:03d}"
         try:
-            success, all_supported, not_supported = compile_nn_module(
-                opset,
+            success, core_decomp_ops, edge_decomp_ops, no_decomp_ops, scripted_ops = get_nn_module_ops(
                 nn_cls,
                 get_init_args,
                 get_forward_args,
                 partial(errors.record, module=repro),
                 main_args=args,
                 path=path)
-            stats["tests_passed"] += int(success)
-            if success:
-                stats["ops"] += 1
-                if all_supported:
-                    stats["ops_passed"] += 1
-                else:
-                    stats["ops_failed"] += 1
+            stats["export_attempts_passed"] += int(success)
 
-            for op in not_supported:
-                stats[op] += 1
+            ops_dict = {}
+            if len(core_decomp_ops) > 0:
+                ops_dict["core_decomp_ops"] = core_decomp_ops
+            if len(edge_decomp_ops) > 0:
+                ops_dict["edge_decomp_ops"] = edge_decomp_ops
+            if len(no_decomp_ops) > 0:
+                ops_dict["no_decomp_ops"] = no_decomp_ops
+            if len(scripted_ops) > 0:
+                ops_dict["scripted_ops"] = scripted_ops
 
-            if len(not_supported) > 0:
-                # Log the set as it's own entry
-                set_key = "set("
-                for op in sorted(not_supported):
-                    set_key += f"{op}, "
-                set_key = set_key[:-2] + ")"
-                stats[set_key] += 1
+            if len(core_decomp_ops) + len(edge_decomp_ops) + len(no_decomp_ops) + len(scripted_ops) > 0:
+                nn_ops_dict[f"{path}.{nn_cls.__name__}"] = ops_dict
+
 
         except JitFailed:
             pass
@@ -197,14 +200,14 @@ def compile_pyfile_subproc(tempdir: str, path: str, args, opset):
         except OnnxFailed:
             pass
 
-    stats["tests_failed"] = stats["tests"] - stats["tests_passed"]
+    stats["export_attempts_failed"] = stats["export_attempts"] - stats["export_attempts_passed"]
 
-    if stats["compile_failed"]:
+    if stats["export_attempts_failed"]:
         stats["projects_failed"] += 1
     else:
         stats["projects_passed"] += 1
 
-    return errors, stats
+    return errors, stats, nn_ops_dict
 
 
 def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, limit: int = None,
@@ -217,10 +220,11 @@ def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, li
     :param fn: inner function to run the tests
     :param jobs: how many processes to run at once
     """
-    feval = partial(compile_pyfile_subproc, args=args, opset=opset)
-    fn = partial(subproc_wrapper, fn=feval)
+    feval = partial(compile_pyfile_subproc, args=args)
+    fn = partial(subproc_wrapper_mod, fn=feval)
     start = time.time()
     stats = Stats()
+    module_ops = {}
     errors = ErrorAggregatorDict()
     testfiles = [os.path.join(tests_dir, f)
                  for f in os.listdir(tests_dir)
@@ -231,12 +235,13 @@ def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, li
         testfiles = testfiles[offset: offset+limit]
 
     pool = ThreadPool(jobs)
-    for errors_part, stats_part in pool.imap_unordered(fn, testfiles):
+    for errors_part, stats_part, nn_ops in pool.imap_unordered(fn, testfiles):
         errors.update(errors_part)
         stats.update(stats_part)
+        module_ops.update(nn_ops)
     pool.close()
     errors.print_report()
-    index = ("projects", "tests", "ops")
+    index = ("projects", "export_attempts")
     report = pd.DataFrame(
         [[stats[f"{k}"], stats[f"{k}_passed"], "{:.1%}".format(stats[f"{k}_passed"] / (stats[f"{k}"] or 1))]
          for k in index],
@@ -244,28 +249,8 @@ def compile_all(opset, args, tests_dir: str = './generated', offset: int = 0, li
         columns=["total", "passing", "score"],
     )
 
-    pickle_obj = {}
-
     log.info(f"TOTAL: {stats}, took {time.time() - start:.1f} seconds\n\n{args.compile_mode} {args.backend} ParityBench:\n{report}\n\n")
-
-    missing_ops = list()
-    for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-        if key.startswith("aten"):
-            print(f"{key}: {value}")
-            missing_ops += [(key, value),]
-    pickle_obj["missing_ops"] = missing_ops
-
-    print("\n\n")
-
-    missing_sets = list()
-    for key, value in sorted(stats.items(), key=lambda x: x[1], reverse=True):
-        if key.startswith("set("):
-            print(f"{key}: {value}")
-            missing_sets += [(key, value),]
-    pickle_obj["missing_sets"] = missing_sets
-
-    pickle_obj["reference_opset"] = opset
 
     if args.pickle_path is not None:
         with open(args.pickle_path, "wb") as f:
-            f.write(pickle.dumps(pickle_obj))
+            f.write(pickle.dumps(module_ops))

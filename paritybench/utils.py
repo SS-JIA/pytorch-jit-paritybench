@@ -109,6 +109,32 @@ def subproc_wrapper(path: str, fn: callable, timeout: int = 900):
                 path
             ), Stats({"crash": 1})
 
+def subproc_wrapper_mod(path: str, fn: callable, timeout: int = 900):
+    """
+    A wrapper around call_with_timeout() adding a temp dir and error handling.
+
+    :param path: path to code to test
+    :param fn: function to run in subprocess
+    :param timeout: seconds to wait
+    :return: errors, stats, dict
+    """
+    log.info(f"Running {path}")
+    with tempfile.TemporaryDirectory(prefix="paritybench") as tempdir:
+        try:
+            return call_with_timeout(fn, (tempdir, path), {}, timeout=timeout)
+        except TimeoutError:
+            return ErrorAggregatorDict.single(
+                "meta",
+                TimeoutError("Timeout testing module"),
+                path
+            ), Stats({"timeout": 1}), {}
+        except OSError:
+            return ErrorAggregatorDict.single(
+                "meta",
+                OSError("Crash testing module"),
+                path
+            ), Stats({"crash": 1}), {}
+
 
 def tempdir_wrapper(path: str, fn: callable):
     """ Non-forking version of subproc_wrapper """
